@@ -20,9 +20,12 @@ esphome:
     name: ${project_name}
     version: ${project_version}
   on_boot:
-    priority: 600
-    then:
-      - uart.write: "sensorStart"
+    - priority: -100
+      then: 
+        - lambda: id(clear_occupancy_script).execute();
+    - priority: 600
+      then:
+        - uart.write: "sensorStart"
 
 esp32:
   board: esp32dev
@@ -50,8 +53,69 @@ esp32_improv:
   authorizer: none
 
 dashboard_import:
-  package_import_url: github://everythingsmarthome/everything-presence-one/everything-presence-one.yaml@main
+  package_import_url: github://n6ham/everything-presence-one/everything-presence-one.yaml@main
   import_full_config: false
+      
+globals:
+  - id: previos_pir_movement_state
+    type: int
+    initial_value: '-1'
+  - id: occupancy_state
+    type: bool
+    initial_value: 'false'
+  - id: occupancy_timeline
+    type: bool[3600]
+  - id: occupancy_time
+    type: int
+    initial_value: '0'
+
+script:
+  - id: clear_occupancy_script
+    then:
+      - lambda: |-
+          for (int i = 0; i < 3600; i++) {
+            id(occupancy_timeline)[i] = false;
+          }
+          id(occupancy_time) = 0;
+          id(mmwave_occupancy).publish_state(false);
+  - id: update_occupancy_script
+    then:
+      - lambda: |-
+          if (id(sntp_time).now().is_valid()) {
+            auto time = id(sntp_time).now();
+            int s = time.minute * 60 + time.second;
+            int w = id(occupancy_window).state;
+            int prev_s = s - w;
+            if (prev_s < 0) {
+              prev_s += 3600;
+            }
+            int sum = id(occupancy_time);
+            if (id(mmwave).state || id(pir_motion_sensor).state) {
+              id(occupancy_timeline)[s] = true;
+              sum++;
+            } else {
+             id(occupancy_timeline)[s] = false;
+            }
+            if (id(occupancy_timeline)[prev_s]) {
+              sum--;
+            }
+            id(occupancy_timeline)[prev_s] = false;
+            id(occupancy_time) = sum;
+            boolean state = id(pir_motion_sensor).state
+               || ((sum * 100 / w) >= id(occupancy_threshold).state);
+            if (id(mmwave_occupancy).state != state) {
+              id(mmwave_occupancy).publish_state(state);
+            }
+          }      
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "America/Los_Angeles"
+    on_time:
+      - seconds: '*'
+        then: 
+          - lambda: id(update_occupancy_script).execute();
 
 light:
   - platform: status_led
@@ -172,6 +236,10 @@ binary_sensor:
     filters:
       - delayed_off:  !lambda 'return id(pir_off_latency).state * 1000.0;'
   - platform: template
+    id: mmwave_occupancy
+    internal: true
+    device_class: occupancy
+  - platform: template
     name: Occupancy
     id: occupancy
     device_class: occupancy
@@ -180,15 +248,11 @@ binary_sensor:
     on_state:
       - lambda: 'id(illuminance_sensor).update();'
     lambda: |-
-      if ( id(mmwave).state or id(pir_motion_sensor).state) {
+      if (id(pir_motion_sensor).state || id(mmwave_occupancy).state) {
         return true;
-      } 
-      else if (id(mmwave).state == 0 and id(pir_motion_sensor).state == 0) {
-        return false;
-      } 
-      else {
-        return id(occupancy).state;
       }
+      return false;
+
 uart:
   id: uart_bus
   tx_pin: GPIO13
@@ -295,10 +359,10 @@ number:
     entity_category: config
     id: mmwave_off_latency
     min_value: 1
-    max_value: 600
-    initial_value: 15
+    max_value: 60
+    initial_value: 10
     optimistic: true
-    step: 5
+    step: 1
     restore_value: true
     unit_of_measurement: seconds
     mode: slider
@@ -306,7 +370,7 @@ number:
       - switch.turn_off: mmwave_sensor
       - delay: 1s
       - uart.write: !lambda |-
-          std::string mss = "setLatency " + to_string(id(mmwave_on_latency).state) + " " + to_string(id(mmwave_off_latency).state);
+          std::string mss = "setLatency " + to_string(id(mmwave_off_latency).state);
           return std::vector<unsigned char>(mss.begin(), mss.end());
       - delay: 1s
       - uart.write: "saveCfg 0x45670123 0xCDEF89AB 0x956128C6 0xDF54AC89"
@@ -319,7 +383,7 @@ number:
     id: mmwave_on_latency
     entity_category: config
     min_value: 0
-    max_value: 2
+    max_value: 1
     initial_value: 0
     optimistic: true
     step: 0.25
@@ -330,7 +394,7 @@ number:
       - switch.turn_off: mmwave_sensor
       - delay: 1s
       - uart.write: !lambda |-
-          std::string mss = "setLatency " + to_string(id(mmwave_on_latency).state) + " " + to_string(id(mmwave_off_latency).state);
+          std::string mss = "setLatency " + to_string(id(mmwave_on_latency).state);
           return std::vector<unsigned char>(mss.begin(), mss.end());
       - delay: 1s
       - uart.write: "saveCfg 0x45670123 0xCDEF89AB 0x956128C6 0xDF54AC89"
@@ -366,7 +430,7 @@ number:
     id: occupancy_off_latency
     min_value: 1
     max_value: 600
-    initial_value: 15
+    initial_value: 10
     optimistic: true
     step: 5
     restore_value: true
@@ -379,12 +443,40 @@ number:
     entity_category: config
     id: pir_off_latency
     min_value: 1
-    max_value: 120
+    max_value: 10
     initial_value: 10
     optimistic: true
     step: 1
     restore_value: true
     unit_of_measurement: seconds
+    mode: slider
+
+  - platform: template
+    name: Occupancy window
+    icon: mdi:clock-end
+    entity_category: config
+    id: occupancy_window
+    min_value: 1
+    max_value: 600
+    initial_value: 30
+    optimistic: true
+    step: 10
+    restore_value: true
+    unit_of_measurement: seconds
+    mode: box
+
+  - platform: template
+    name: Occupancy threshold
+    icon: mdi:clock-end
+    entity_category: config
+    id: occupancy_threshold
+    min_value: 0
+    max_value: 100
+    initial_value: 50
+    optimistic: true
+    step: 5
+    restore_value: true
+    unit_of_measurement: '%'
     mode: slider
 
   - platform: template
