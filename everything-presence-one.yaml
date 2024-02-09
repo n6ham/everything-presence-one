@@ -370,7 +370,7 @@ number:
       - switch.turn_off: mmwave_sensor
       - delay: 1s
       - uart.write: !lambda |-
-          std::string mss = "setLatency " + to_string(id(mmwave_off_latency).state);
+          std::string mss = "setLatency " + to_string(id(mmwave_on_latency).state) + " " + to_string(id(mmwave_off_latency).state);
           return std::vector<unsigned char>(mss.begin(), mss.end());
       - delay: 1s
       - uart.write: "saveCfg 0x45670123 0xCDEF89AB 0x956128C6 0xDF54AC89"
@@ -394,7 +394,7 @@ number:
       - switch.turn_off: mmwave_sensor
       - delay: 1s
       - uart.write: !lambda |-
-          std::string mss = "setLatency " + to_string(id(mmwave_on_latency).state);
+          std::string mss = "setLatency " + to_string(id(mmwave_on_latency).state) + " " + to_string(id(mmwave_off_latency).state);
           return std::vector<unsigned char>(mss.begin(), mss.end());
       - delay: 1s
       - uart.write: "saveCfg 0x45670123 0xCDEF89AB 0x956128C6 0xDF54AC89"
